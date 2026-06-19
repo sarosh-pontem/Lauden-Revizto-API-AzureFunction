@@ -5,12 +5,18 @@ import requests
 import pandas as pd
 from azure.storage.blob import BlobServiceClient
 import io
+import json
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
-CONNECTION_STRING = os.getenv("CONNECTION_STRING")
+
+
+CONNECTION_STRING =  os.getenv("AzureWebJobsStorage")
 CONTAINER_NAME = "revizto-api"
 BLOB_NAME = "revizto_refresh_token.txt"
 
+
+blob_service_client = BlobServiceClient.from_connection_string(CONNECTION_STRING)
+blob_client = blob_service_client.get_blob_client(container=CONTAINER_NAME, blob=BLOB_NAME)
 
 
 @app.route(route="issues")
@@ -25,15 +31,23 @@ def issues(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(f"An error occurred: {str(e)}", status_code=500)
     
 
-blob_service_client = BlobServiceClient.from_connection_string(CONNECTION_STRING)
-blob_client = blob_service_client.get_blob_client(container=CONTAINER_NAME, blob=BLOB_NAME)
+@app.route(route="stamps")
+def stamps(req: func.HttpRequest) -> func.HttpResponse:
+    try:
 
+        get_stamp_template_forall_projects()
 
-REGION = "canada" 
-BASE_URL = f"https://api.{REGION}.revizto.com/v5/oauth2"
+        return func.HttpResponse("Stamps fetched and saved successfully.", status_code=200)
+    except Exception as e:
+        logging.error(f"Error: {e}")
+        return func.HttpResponse(f"An error occurred: {str(e)}", status_code=500)
+    
+    
+
+BASE_URL = f"https://api.canada.revizto.com/v5/oauth2"
 TOKEN_FILE = "revizto_refresh_token.txt"
 
-API_URL = f"https://api.{REGION}.revizto.com/v5"
+API_URL = f"https://api.canada.revizto.com/v5"
 
 
 
@@ -166,12 +180,60 @@ def fetch_projects():
 
             })
 
+
     project_df = pd.DataFrame(project_data)
 
     save_to_blob_storage(project_df, 'revizto_projects.csv')    
 
     return project_data
                     
+
+def fetch_stamp_templates(projectUuid,access_token):
+    
+    stamp_template_data = []
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {access_token}",
+    }
+
+    license_projects_url = f"https://api.canada.revizto.com/v5/project/{projectUuid}/issue-preset/list?page=0"
+    stamps_response = requests.get(license_projects_url, headers=headers)
+
+        
+
+    if stamps_response.status_code == 200:
+        stamp_templates = stamps_response.json()
+        
+        logging.info(stamp_templates)
+
+        stamp_template_response = stamp_templates.get("data", []).get("entities", [])
+            
+        for stamp_template in stamp_template_response:
+
+        
+              
+            get_fields_json = json.loads(stamp_template.get("fields", {}))
+
+            has_field = bool(get_fields_json)
+            
+
+            stamp_template_data.append({
+                "projectUuid": projectUuid,
+                "uuid": stamp_template.get("uuid"),
+                "title": stamp_template.get("title"),
+                "parentUuid": stamp_template.get("parentUuid"),
+                "nodeRole": stamp_template.get("nodeRole"),
+                "stampAbbr": get_fields_json.get("stampAbbr", "") if has_field else [],
+                "customType": get_fields_json.get("customType", "") if has_field else ""
+
+
+            })
+
+
+    return stamp_template_data
+
+
+
 def fetch_issues(project_uuid,project_title,access_token):
 
     issue_list = []
@@ -183,12 +245,15 @@ def fetch_issues(project_uuid,project_title,access_token):
         "Authorization": f"Bearer {access_token}",
     }
 
+
+
     issues_response = requests.get(issue_url, headers=headers)
 
     if issues_response.status_code == 200:
         issues = issues_response.json()
         number_pages = issues.get("data", {}).get("pages", 1)
-        
+
+
     for page in range(0, number_pages + 1):
         paged_issue_url = f"https://api.canada.revizto.com/v5/project/{project_uuid}/issue-filter/filter?page={page}&sendFullIssueData=True"
         issues_response = requests.get(paged_issue_url, headers=headers)
@@ -201,9 +266,16 @@ def fetch_issues(project_uuid,project_title,access_token):
                 sheet_val = issue_item.get("sheet", {}).get("value")
                 
                 has_sheet = isinstance(sheet_val, dict)
-            
+
+                issue_tag_check = issue_item.get("tags",{}).get("value")
+
+                has_Tag = bool(issue_tag_check)
+
+
+
                 issue_list.append({
                     "project_title":project_title,
+                    "project_uuid": project_uuid,
                     "uuid": issue_item.get("uuid"),
                     "id": issue_item.get("id"),
                     "author_firstname": issue_item.get("author", {}).get("firstname"),
@@ -224,7 +296,8 @@ def fetch_issues(project_uuid,project_title,access_token):
                     "reporter": issue_item.get("reporter", {}).get("value"),
                     "stampAbbr": issue_item.get("stampAbbr", {}).get("value"),
                     "title": issue_item.get("title",{}).get("value"),
-                    "deleted_at": issue_item.get("deleted_at",{}.get("value"))
+                    "deleted_at": issue_item.get("deleted_at",{}.get("value")),
+                    "tags": issue_item.get("tags",{}).get("value",[])[0] if has_Tag else ""
                 })
            
             
@@ -244,7 +317,7 @@ def get_issues_for_all_projects():
 
     access_token = get_valid_access_token()
 
-    project_df = []
+    issue_list = []
     for project in project_data:
         
         isssue_data_list =  fetch_issues(project["project_uuid"],project["project_title"],access_token)
@@ -254,10 +327,32 @@ def get_issues_for_all_projects():
 
 
         if isssue_data_list:
-            project_df.extend(isssue_data_list)
+            issue_list.extend(isssue_data_list)
 
     
-    issues_df = pd.DataFrame(project_df)
+    issues_df = pd.DataFrame(issue_list)
 
     save_to_blob_storage(issues_df, 'revizto_issues.csv')
+
+
+
+def get_stamp_template_forall_projects():
+
+    project_data = fetch_projects()
+
+    access_token = get_valid_access_token()
+
+    stamp_data_list = []
+
+    for project in project_data:
+        
+        stamp_data_response =  fetch_stamp_templates(project["project_uuid"],access_token)
+
+    
+        if stamp_data_response:
+            stamp_data_list.extend(stamp_data_response)
+        
+    stamp_df = pd.DataFrame(stamp_data_list)
+    
+    save_to_blob_storage(stamp_df, 'revizto_stamp_templates.csv')
 
