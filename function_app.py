@@ -42,7 +42,20 @@ def stamps(req: func.HttpRequest) -> func.HttpResponse:
         logging.error(f"Error: {e}")
         return func.HttpResponse(f"An error occurred: {str(e)}", status_code=500)
     
+
+@app.route(route="users")
+def users(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+
+        fetch_users()
+
+        return func.HttpResponse("Users fetched and saved successfully.", status_code=200)
+    except Exception as e:
+        logging.error(f"Error: {e}")
+        return func.HttpResponse(f"An error occurred: {str(e)}", status_code=500)
     
+
+
 
 BASE_URL = f"https://api.canada.revizto.com/v5/oauth2"
 TOKEN_FILE = "revizto_refresh_token.txt"
@@ -262,6 +275,8 @@ def fetch_issues(project_uuid,project_title,access_token):
 
             for issue_item in issue_per_page:
                 
+                logging.info(issue_item)
+
                 #check whether the specific issue has a sheet attached to it
                 sheet_val = issue_item.get("sheet", {}).get("value")
                 
@@ -356,3 +371,51 @@ def get_stamp_template_forall_projects():
     
     save_to_blob_storage(stamp_df, 'revizto_stamp_templates.csv')
 
+
+
+
+
+
+def fetch_users():
+    
+    users_list = []
+    
+    LICENSE_UUID = "12da63f7-3e2b-4dae-99bd-26c7cc71cdae"
+
+
+    logging.info("Fetching valid Access Token...")
+    access_token = get_valid_access_token()
+
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {access_token}",
+    }
+
+    users_url = f"https://api.canada.revizto.com/v5/license/{LICENSE_UUID}/team"
+    users_response = requests.get(users_url, headers=headers)
+
+    logging.info(users_response.status_code)
+
+    if users_response.status_code == 200:
+        users = users_response.json()
+
+    users_data = users.get("data", {}).get("entities", [])
+
+    for user in users_data:
+        
+        user_record = user['user']
+
+        
+        users_list.append({
+            "firstname": user_record.get("firstname"),
+            "lastname": user_record.get("lastname"),
+            "email": user_record.get("email"),
+            "uuid": user_record.get("uuid")
+    
+        })
+        
+    users_df = pd.DataFrame(users_list)
+
+    save_to_blob_storage(users_df, 'revizto_users.csv')    
+
+   
